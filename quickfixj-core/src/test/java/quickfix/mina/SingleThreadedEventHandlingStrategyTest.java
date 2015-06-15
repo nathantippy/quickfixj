@@ -51,6 +51,7 @@ public class SingleThreadedEventHandlingStrategyTest {
             SessionConnector connector = new SessionConnectorUnderTest(settings, sessionFactory);
             ehs = new SingleThreadedEventHandlingStrategy(connector, 1000);
             ehs.blockInThread();
+            Thread.sleep(500);
             ehs.blockInThread();
             checkThreads(bean);
         } finally {

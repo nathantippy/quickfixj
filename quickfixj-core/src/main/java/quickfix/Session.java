@@ -1384,10 +1384,20 @@ public class Session implements Closeable {
                             + newSequence);
             if (newSequence > getExpectedTargetNum()) {
                 state.setNextTargetMsgSeqNum(newSequence);
-                final ResendRange range = state.getResendRange();
-                if (range.isChunkedResendRequest()) {
-                    if (newSequence >= range.getCurrentEndSeqNo()
-                            && newSequence < range.getEndSeqNo()) {
+                
+                final boolean isChunkedResendRequest;
+                final int endSeqNo;           
+                final int currentEndSeqNo;
+            	synchronized (state.getLock()) {
+            		//WARNING: use of resendRange must be done protected by lock or there is a risk of dirty reads of partial updates                
+            		ResendRange range = state.getResendRange();
+            		isChunkedResendRequest = range.isChunkedResendRequest();
+            		endSeqNo = range.getEndSeqNo();
+            		currentEndSeqNo = range.getCurrentEndSeqNo();
+            	}
+                if (isChunkedResendRequest) {
+                    if (newSequence >= currentEndSeqNo
+                            && newSequence < endSeqNo) {
                         // If new seq no is beyond the range of the current chunk
                         // and if we are not done with all resend chunks,
                         // we send out a ResendRequest at once.
@@ -1395,8 +1405,8 @@ public class Session implements Closeable {
                         // which would trigger another resend.
                         final String beginString = sequenceReset.getHeader().getString(
                                 BeginString.FIELD);
-                        sendResendRequest(beginString, range.getEndSeqNo() + 1, newSequence + 1,
-                                range.getEndSeqNo());
+                        sendResendRequest(beginString, endSeqNo + 1, newSequence + 1,
+                        		endSeqNo);
                     }
                 }
                 // QFJ-728: newSequence will be the seqnum of the next message so we
@@ -1656,19 +1666,22 @@ public class Session implements Closeable {
             }
 
             if ((checkTooHigh) && state.isResendRequested()) {
-                final ResendRange range;
-                synchronized (state.getLock()) {
-                    range = state.getResendRange();
+                final boolean sendResend;
+                final int endSeqNo;
+            	synchronized (state.getLock()) {
+                	ResendRange range = state.getResendRange();//WARNING only use when protected by state.getLock()
                     if (msgSeqNum >= range.getEndSeqNo()) {
                         getLog().onEvent(
                                 "ResendRequest for messages FROM " + range.getBeginSeqNo() + " TO " + range.getEndSeqNo()
                                         + " has been satisfied.");
                         state.setResendRange(0, 0, 0);
                     }
+                    sendResend = msgSeqNum < range.getEndSeqNo() && range.isChunkedResendRequest() && msgSeqNum >= range.getCurrentEndSeqNo(); 
+                    endSeqNo = range.getEndSeqNo();
                 }
-                if (msgSeqNum < range.getEndSeqNo() && range.isChunkedResendRequest() && msgSeqNum >= range.getCurrentEndSeqNo()) {
+                if (sendResend) {
                     final String beginString = header.getString(BeginString.FIELD);
-                    sendResendRequest(beginString, range.getEndSeqNo() + 1, msgSeqNum + 1, range.getEndSeqNo());
+                    sendResendRequest(beginString, endSeqNo + 1, msgSeqNum + 1, endSeqNo);
                 }
             }
         } catch (final FieldNotFound e) {
@@ -2276,14 +2289,25 @@ public class Session implements Closeable {
         enqueueMessage(msg, msgSeqNum);
 
         if (state.isResendRequested()) {
-            final ResendRange range = state.getResendRange();
-
-            if (!redundantResentRequestsAllowed && msgSeqNum >= range.getBeginSeqNo()) {
-                getLog().onEvent(
-                        "Already sent ResendRequest FROM: " + range.getBeginSeqNo() + " TO: " + range.getEndSeqNo()
-                                + ".  Not sending another.");
-                return;
-            }
+        	if (!redundantResentRequestsAllowed) {
+        		
+	        	final int beginSeqNo;
+	        	final int endSeqNo;
+	        	synchronized (state.getLock()) {
+	        		//WARNING: use of resendRange must be done protected by lock or there is a risk of dirty reads of partial updates
+	        	    ResendRange range = state.getResendRange();	
+	        	    beginSeqNo = range.getBeginSeqNo();
+	        		endSeqNo = range.getEndSeqNo();
+	        	}
+	        	
+	            if (msgSeqNum >= beginSeqNo) {
+	                getLog().onEvent(
+	                        "Already sent ResendRequest FROM: " + beginSeqNo + " TO: " + endSeqNo
+	                                + ".  Not sending another.");
+	                return;
+	            }
+	            
+        	}
         }
 
         generateResendRequest(beginString, msgSeqNum);
